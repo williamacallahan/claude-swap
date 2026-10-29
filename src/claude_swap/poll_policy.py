@@ -104,6 +104,11 @@ CANDIDATE_MAX_INTERVAL_S = 600.0
 PROBE_ACTIVE_INTERVAL_S = 120.0
 PROBE_IDLE_INTERVAL_S = 900.0
 
+
+def probe_floor_s(is_active: bool) -> float:
+    """The shortest gap between two probe reads of one setup-token slot."""
+    return PROBE_ACTIVE_INTERVAL_S if is_active else PROBE_IDLE_INTERVAL_S
+
 # Exhaustion is stable enough to poll slowly, but not to stop polling until a
 # reported reset. Quota grants and provider-side corrections can make an
 # account usable before that timestamp, and decision-grade status must not age

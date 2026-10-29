@@ -5354,9 +5354,19 @@ class ClaudeAccountSwitcher:
 
         # A setup-token cannot read the usage endpoint and has no refresh token
         # to manage; one real Claude Code request with it reports the windows.
-        if not oauth.can_read_usage(creds):
+        # A rejected token strikes this exact credential, so the slot reads
+        # "re-login needed" and fails over until a new token replaces it.
+        if oauth.reads_usage_by_probe(creds):
             outcome = oauth.probe_usage_via_claude(creds)
-            return FetchRecord(usage=outcome.usage, error=outcome.error)
+            return FetchRecord(
+                usage=outcome.usage,
+                error=outcome.error,
+                struck_fp=(
+                    oauth.credential_fingerprint(creds)
+                    if outcome.error == "probe-token-rejected"
+                    else None
+                ),
+            )
 
         # The active/default account owns the live credential — route it
         # through the locked-refresh path (refreshes an expired token under
@@ -5569,10 +5579,26 @@ class ClaudeAccountSwitcher:
                     [num], {num: identities[num]}
                 )
                 entries = store.entries(identities, models)
+        # The probe floor binds every caller, escalation included: a plan alone
+        # is skipped when switching wants every candidate fresh, and each
+        # setup-token read spends the account's quota on a `claude` process.
+        floor_now = store.clock()
+
+        def probed_too_recently(num: str) -> bool:
+            info = info_by_num[num]
+            fetched_at = entries[num].fetched_at
+            return (
+                oauth.reads_usage_by_probe(info[5])
+                and fetched_at is not None
+                and floor_now - fetched_at < poll_policy.probe_floor_s(bool(info[4]))
+            )
+
         requested = [
             num
             for num in info_by_num
-            if num not in sentinels and (fetch is None or num in fetch)
+            if num not in sentinels
+            and (fetch is None or num in fetch)
+            and not probed_too_recently(num)
         ]
         if fetch is None:
             # Repair reset-parked plans written by releases that stopped
@@ -5801,14 +5827,10 @@ class ClaudeAccountSwitcher:
                 now=now,
                 refresh_at=refresh_at,
             )
-            if not oauth.can_read_usage(info_by_num[num][5]):
+            if oauth.reads_usage_by_probe(info_by_num[num][5]):
                 # A setup-token's reading is a real Claude Code request, not a
                 # free endpoint call, so it keeps its own slower cadence.
-                floor = (
-                    poll_policy.PROBE_ACTIVE_INTERVAL_S
-                    if is_active
-                    else poll_policy.PROBE_IDLE_INTERVAL_S
-                )
+                floor = poll_policy.probe_floor_s(is_active)
                 next_at, interval = max(next_at, now + floor), max(interval, floor)
             plans[num] = (next_at, interval)
         return plans

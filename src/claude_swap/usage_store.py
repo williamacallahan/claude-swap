@@ -230,8 +230,13 @@ AUTH_DEAD_STRIKES = 1
 # transient 429/timeout/network). Only these advance the dead-token strike
 # count; everything else leaves it untouched (a transient error is no evidence
 # the token is alive *or* dead). "no_refresh_token" is equally unretryable:
-# a credential with no refresh token cannot be healed by any retry.
-PERMANENT_AUTH_ERRORS = frozenset({"invalid_grant", "no_refresh_token"})
+# a credential with no refresh token cannot be healed by any retry, and a
+# setup-token Claude Code reports invalid ("probe-token-rejected") stays
+# invalid until the slot gets a new token, which heals the fingerprint-bound
+# strike.
+PERMANENT_AUTH_ERRORS = frozenset(
+    {"invalid_grant", "no_refresh_token", "probe-token-rejected"}
+)
 
 # (email, organizationUuid) — the identity a slot number currently maps to.
 Identity = tuple[str, str]

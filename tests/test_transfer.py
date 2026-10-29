@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -2289,6 +2290,62 @@ class TestSetupTokensReadFleetUsage:
         assert probe.call_count == 1
         # The plan's clock read precedes the recorded fetch time by microseconds.
         assert entry.next_poll_at - entry.fetched_at >= poll_policy.PROBE_IDLE_INTERVAL_S - 1
+
+    def test_escalation_cannot_reprobe_an_idle_token_inside_its_floor(
+        self, temp_home: Path
+    ):
+        from claude_swap import oauth
+
+        s = self._token_switcher(temp_home)
+        with patch(
+            "claude_swap.oauth.try_fetch_usage_for_account",
+            return_value=oauth.UsageOutcome({"five_hour": {"pct": 1.0}}),
+        ), patch(
+            "claude_swap.oauth.probe_usage_via_claude",
+            return_value=oauth.UsageOutcome({"five_hour": {"pct": 10.0}}),
+        ) as probe:
+            s.usage_entries_by_account(fetch={"2"})
+            # Past the serve TTL an escalating engine asks for every candidate
+            # with plans ignored; the probe floor still holds.
+            s._usage_store.clock = lambda: time.time() + 400
+            s.usage_entries_by_account(fetch={"2"})
+
+        assert probe.call_count == 1
+
+    def test_a_rejected_token_reads_relogin_needed(self, temp_home: Path):
+        from claude_swap import oauth
+        from claude_swap.json_output import USAGE_RELOGIN_REQUIRED
+
+        s = self._token_switcher(temp_home)
+        with patch(
+            "claude_swap.oauth.try_fetch_usage_for_account",
+            return_value=oauth.UsageOutcome({"five_hour": {"pct": 1.0}}),
+        ), patch(
+            "claude_swap.oauth.probe_usage_via_claude",
+            return_value=oauth.UsageOutcome(None, "probe-token-rejected"),
+        ):
+            entries = s.usage_entries_by_account(fetch={"2"})
+
+        assert entries["2"].sentinel == USAGE_RELOGIN_REQUIRED
+
+    def test_a_refreshable_login_without_profile_scope_is_never_probed(
+        self, temp_home: Path
+    ):
+        from claude_swap import oauth
+
+        s = _linux_switcher(temp_home)
+        _seed_account(s, 1, "alice@example.com", creds=_live_creds("alice"))
+        login = _live_creds("carol")
+        login["claudeAiOauth"]["scopes"] = []
+        _seed_account(s, 2, "carol@example.com", creds=login)
+        with patch(
+            "claude_swap.oauth.try_fetch_usage_for_account",
+            return_value=oauth.UsageOutcome({"five_hour": {"pct": 1.0}}),
+        ) as endpoint, patch("claude_swap.oauth.probe_usage_via_claude") as probe:
+            s.list_accounts(json_output=True)
+
+        assert probe.call_count == 0
+        assert "carol@example.com" in [c.args[1] for c in endpoint.call_args_list]
 
     def test_a_token_never_replaces_a_browser_login(self, temp_home: Path):
         from claude_swap.exceptions import ValidationError

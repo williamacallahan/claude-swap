@@ -124,6 +124,17 @@ def can_read_usage(credentials: str) -> bool:
     return not isinstance(scopes, list) or USAGE_READ_SCOPE in scopes
 
 
+def reads_usage_by_probe(credentials: str) -> bool:
+    """Whether this credential's usage comes from `probe_usage_via_claude`.
+
+    Only a refreshless credential that cannot read the endpoint: a setup-token.
+    A login holding a refresh token keeps its refresh lifecycle whatever its
+    recorded scopes say.
+    """
+    data = extract_oauth_data(credentials) or {}
+    return not can_read_usage(credentials) and not data.get("refreshToken")
+
+
 def is_newer_generation(candidate: dict, reference: dict) -> bool:
     """Whether ``candidate`` was issued after ``reference`` in one lineage.
 
@@ -744,7 +755,10 @@ def fetch_usage(access_token: str) -> dict | None:
 # mostly cached tokens) reads them; the Anthropic SDK's debug log is where
 # Claude Code exposes response headers. Its output stays in this process and is
 # never logged: the debug stream also carries request details.
-PROBE_TIMEOUT_S = 90.0
+# Well inside the usage store's 90 s claim (CLAIM_TTL_S), with the batch
+# stagger on top, so a slow probe never outlives its lease and a second
+# collector never launches a duplicate. A probe normally takes 2-8 s.
+PROBE_TIMEOUT_S = 45.0
 _PROBE_HEADER_RE = re.compile(
     r"anthropic-ratelimit-unified-(5h|7d)-(utilization|reset)['\"]?\s*[:=]\s*['\"]?([0-9.]+)"
 )
