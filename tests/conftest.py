@@ -743,6 +743,22 @@ def _no_live_anthropic_requests(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _block_claude_usage_probe(request, monkeypatch):
+    """A setup-token's usage read runs a real `claude -p`; under pytest it would
+    spend a fixture's fake token against the live API. Tests that read usage
+    patch the probe (or, marked ``real_claude_probe``, drive it against a fake
+    ``claude`` on PATH)."""
+    if request.node.get_closest_marker("real_claude_probe"):
+        return
+    from claude_swap import oauth
+
+    monkeypatch.setattr(
+        "claude_swap.oauth.probe_usage_via_claude",
+        lambda credentials: oauth.UsageOutcome(None, "probe-blocked-under-pytest"),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _deterministic_poll_jitter(monkeypatch):
     """Zero the poll-plan jitter so cadence tests are clock-exact; the jitter
     itself is exercised in test_poll_policy via an injected rng."""

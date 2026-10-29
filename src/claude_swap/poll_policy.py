@@ -97,6 +97,13 @@ ACTIVE_MAX_INTERVAL_S = 300.0
 CANDIDATE_DEFAULT_INTERVAL_S = 300.0
 CANDIDATE_MAX_INTERVAL_S = 600.0
 
+# A setup-token's reading is one real `claude -p` (a process spawn and ~3k
+# mostly cached tokens of the account's own quota), so it never polls faster
+# than these, whatever the plan above asks: the active account fast enough to
+# switch before its limit, an idle one rarely, since only use moves it.
+PROBE_ACTIVE_INTERVAL_S = 120.0
+PROBE_IDLE_INTERVAL_S = 900.0
+
 # Exhaustion is stable enough to poll slowly, but not to stop polling until a
 # reported reset. Quota grants and provider-side corrections can make an
 # account usable before that timestamp, and decision-grade status must not age

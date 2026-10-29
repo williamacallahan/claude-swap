@@ -1679,3 +1679,56 @@ class TestLoginExpiresAtIso:
 @pytest.mark.parametrize("creds", ["[]", '"sk-ant-oat01-x"', "7", "null"])
 def test_extract_oauth_data_is_none_for_json_that_is_not_an_object(creds):
     assert oauth.extract_oauth_data(creds) is None
+
+
+@pytest.mark.real_claude_probe
+class TestProbeUsageViaClaude:
+    """A setup-token's usage comes from the rate-limit headers on one real
+    `claude -p` it makes; a fake `claude` on PATH stands in for the CLI."""
+
+    TOKEN = "sk-ant-oat01-" + "t" * 95
+
+    def _fake_claude(self, tmp_path, monkeypatch, body: str) -> None:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        claude = bin_dir / "claude"
+        claude.write_text("#!/bin/sh\n" + body)
+        claude.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+
+    def _creds(self) -> str:
+        return json.dumps({"claudeAiOauth": {"accessToken": self.TOKEN, "scopes": ["user:inference"]}})
+
+    def test_reads_both_windows_from_the_debug_headers(self, tmp_path, monkeypatch):
+        # The token must arrive in the environment, never as an argument.
+        self._fake_claude(tmp_path, monkeypatch, f"""
+case "$*" in *{self.TOKEN}*) echo leaked; exit 1 ;; esac
+[ "$CLAUDE_CODE_OAUTH_TOKEN" = "{self.TOKEN}" ] || exit 1
+echo "  'anthropic-ratelimit-unified-5h-utilization': '0.42'," >&2
+echo "  'anthropic-ratelimit-unified-5h-reset': '1893456000'," >&2
+echo "  'anthropic-ratelimit-unified-7d-utilization': '0.29'," >&2
+echo "  'anthropic-ratelimit-unified-7d-reset': '1893888000'," >&2
+echo OK
+""")
+        outcome = oauth.probe_usage_via_claude(self._creds())
+
+        assert outcome.error is None
+        assert outcome.usage["five_hour"]["pct"] == 42.0
+        assert outcome.usage["seven_day"]["pct"] == 29.0
+        assert outcome.usage["five_hour"]["resets_at"] == "2030-01-01T00:00:00+00:00"
+
+    def test_a_rejected_token_is_an_error_not_a_reading(self, tmp_path, monkeypatch):
+        self._fake_claude(tmp_path, monkeypatch, 'echo "Invalid API key · Please run /login"\nexit 1\n')
+
+        outcome = oauth.probe_usage_via_claude(self._creds())
+
+        assert outcome.usage is None
+        assert outcome.error == "probe-token-rejected"
+
+    def test_no_headers_is_an_error_not_a_reading(self, tmp_path, monkeypatch):
+        self._fake_claude(tmp_path, monkeypatch, "echo OK\n")
+
+        outcome = oauth.probe_usage_via_claude(self._creds())
+
+        assert outcome.usage is None
+        assert outcome.error == "probe-no-headers"

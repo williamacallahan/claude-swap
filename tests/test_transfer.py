@@ -2227,47 +2227,68 @@ class TestImportUsage:
 
 
 class TestSetupTokensReadFleetUsage:
-    """A setup-token cannot read usage itself; a machine holding the account's
-    browser login pushes its readings, which land on the token's slot when the
-    token carries the same (email, org) identity."""
+    """A setup-token cannot read the usage endpoint; its own Claude Code request
+    reports the account's windows, so each machine reads it in place, on a
+    slower cadence than an endpoint fetch."""
 
     ORG = "11111111-2222-3333-4444-555555555555"
 
-    def test_org_token_takes_pushed_readings_and_is_never_fetched(
-        self, temp_home: Path
-    ):
-        from claude_swap import oauth
-        from claude_swap.transfer import import_usage
-
+    def _token_switcher(self, temp_home: Path) -> ClaudeAccountSwitcher:
         s = _linux_switcher(temp_home)
         _seed_account(s, 1, "alice@example.com", creds=_live_creds("alice"))
         s.add_account_from_token(
             "sk-ant-oat01-bob", email="bob@example.com", slot=2, org_uuid=self.ORG
         )
-        path = temp_home / "usage.json"
-        path.write_text(_usage_document(
-            _usage_row("bob@example.com", self.ORG, pct=42.0, age_s=400.0)
-        ), encoding="utf-8")
-        import_usage(s, str(path))
+        return s
 
-        fetched: list[str] = []
+    def test_a_token_reads_its_usage_through_claude_never_the_endpoint(
+        self, temp_home: Path
+    ):
+        from claude_swap import oauth
 
-        def fake_fetch(num, email, creds, **kwargs):
-            fetched.append(email)
+        s = self._token_switcher(temp_home)
+        endpoint: list[str] = []
+        probed: list[str] = []
+
+        def fake_endpoint(num, email, creds, **kwargs):
+            endpoint.append(email)
             return oauth.UsageOutcome({"five_hour": {"pct": 1.0}})
 
-        with patch(
-            "claude_swap.oauth.try_fetch_usage_for_account", side_effect=fake_fetch
-        ):
+        def fake_probe(creds):
+            probed.append(oauth.extract_access_token(creds))
+            return oauth.UsageOutcome({"five_hour": {"pct": 42.0}, "seven_day": {"pct": 7.0}})
+
+        with patch("claude_swap.oauth.try_fetch_usage_for_account", side_effect=fake_endpoint), \
+                patch("claude_swap.oauth.probe_usage_via_claude", side_effect=fake_probe):
             payload = s.list_accounts(json_output=True)
 
-        # Past the freshness window with no hold, the old collector fetched
-        # the token (a 403 every time); now only pushed readings reach it.
-        assert "bob@example.com" not in fetched
+        assert "bob@example.com" not in endpoint
+        assert probed == ["sk-ant-oat01-bob"]
         bob = next(a for a in payload["accounts"] if a["email"] == "bob@example.com")
         assert bob["organizationUuid"] == self.ORG
         entry = s._usage_store.entries({"2": ("bob@example.com", self.ORG)})["2"]
         assert entry.last_good["five_hour"]["pct"] == 42.0
+
+    def test_an_idle_token_waits_the_probe_floor_before_its_next_read(
+        self, temp_home: Path
+    ):
+        from claude_swap import oauth, poll_policy
+
+        s = self._token_switcher(temp_home)
+        with patch(
+            "claude_swap.oauth.try_fetch_usage_for_account",
+            return_value=oauth.UsageOutcome({"five_hour": {"pct": 1.0}}),
+        ), patch(
+            "claude_swap.oauth.probe_usage_via_claude",
+            return_value=oauth.UsageOutcome({"five_hour": {"pct": 10.0}}),
+        ) as probe:
+            s.list_accounts(json_output=True)
+            s.list_accounts(json_output=True)
+
+        entry = s._usage_store.entries({"2": ("bob@example.com", self.ORG)})["2"]
+        assert probe.call_count == 1
+        # The plan's clock read precedes the recorded fetch time by microseconds.
+        assert entry.next_poll_at - entry.fetched_at >= poll_policy.PROBE_IDLE_INTERVAL_S - 1
 
     def test_a_token_never_replaces_a_browser_login(self, temp_home: Path):
         from claude_swap.exceptions import ValidationError

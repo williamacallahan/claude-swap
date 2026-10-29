@@ -5352,6 +5352,12 @@ class ClaudeAccountSwitcher:
         is the row's refused-credential stamp, if any."""
         num, email, _, org_uuid, is_active, creds, _alias = account_info
 
+        # A setup-token cannot read the usage endpoint and has no refresh token
+        # to manage; one real Claude Code request with it reports the windows.
+        if not oauth.can_read_usage(creds):
+            outcome = oauth.probe_usage_via_claude(creds)
+            return FetchRecord(usage=outcome.usage, error=outcome.error)
+
         # The active/default account owns the live credential — route it
         # through the locked-refresh path (refreshes an expired token under
         # Claude Code's own lock protocol, owner or not).
@@ -5563,15 +5569,10 @@ class ClaudeAccountSwitcher:
                     [num], {num: identities[num]}
                 )
                 entries = store.entries(identities, models)
-        # A setup-token's usage arrives only from a machine holding the
-        # account's browser login (`cswap import-usage`); asking the endpoint
-        # itself is a 403 every time, and the retries end in 429s.
         requested = [
             num
             for num in info_by_num
-            if num not in sentinels
-            and (fetch is None or num in fetch)
-            and oauth.can_read_usage(info_by_num[num][5])
+            if num not in sentinels and (fetch is None or num in fetch)
         ]
         if fetch is None:
             # Repair reset-parked plans written by releases that stopped
@@ -5788,7 +5789,7 @@ class ClaudeAccountSwitcher:
                 if is_active
                 else None
             )
-            plans[num] = poll_policy.plan_after_fetch(
+            next_at, interval = poll_policy.plan_after_fetch(
                 prev_interval_s=before.poll_interval_s if before else None,
                 prev_usage=before.last_good if before else None,
                 new_usage=rec.usage,
@@ -5800,6 +5801,16 @@ class ClaudeAccountSwitcher:
                 now=now,
                 refresh_at=refresh_at,
             )
+            if not oauth.can_read_usage(info_by_num[num][5]):
+                # A setup-token's reading is a real Claude Code request, not a
+                # free endpoint call, so it keeps its own slower cadence.
+                floor = (
+                    poll_policy.PROBE_ACTIVE_INTERVAL_S
+                    if is_active
+                    else poll_policy.PROBE_IDLE_INTERVAL_S
+                )
+                next_at, interval = max(next_at, now + floor), max(interval, floor)
+            plans[num] = (next_at, interval)
         return plans
 
     def _replan_new_active(self, number: str, email: str, org_uuid: str) -> None:

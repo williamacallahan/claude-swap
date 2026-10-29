@@ -5,12 +5,18 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 from claude_swap.printer import warning as print_warning
 
@@ -102,7 +108,8 @@ def login_expires_at_iso(credentials: str) -> str | None:
 
 
 # The usage endpoint answers only logins carrying this scope; setup-tokens
-# are inference-only and get 403 there on every attempt.
+# are inference-only and get 403 there on every attempt, so their usage comes
+# from `probe_usage_via_claude` instead.
 USAGE_READ_SCOPE = "user:profile"
 
 
@@ -729,6 +736,60 @@ def fetch_usage(access_token: str) -> dict | None:
         kind, _ = _classify_usage_error(e)
         _log_usage_failure("", e, kind)
         return None
+
+
+# A setup-token cannot read the usage endpoint, but every Claude Code request it
+# makes is answered with the account's unified rate-limit windows as response
+# headers. One minimal real `claude -p` (no tools, no settings, no MCP: ~3k
+# mostly cached tokens) reads them; the Anthropic SDK's debug log is where
+# Claude Code exposes response headers. Its output stays in this process and is
+# never logged: the debug stream also carries request details.
+PROBE_TIMEOUT_S = 90.0
+_PROBE_HEADER_RE = re.compile(
+    r"anthropic-ratelimit-unified-(5h|7d)-(utilization|reset)['\"]?\s*[:=]\s*['\"]?([0-9.]+)"
+)
+
+
+def probe_usage_via_claude(credentials: str) -> UsageOutcome:
+    """Usage for a setup-token, read from one real Claude Code request's headers."""
+    token = extract_access_token(credentials)
+    if not token:
+        return UsageOutcome(None, "no-access-token")
+    claude = shutil.which("claude") or str(Path.home() / ".local/bin/claude")
+    with tempfile.TemporaryDirectory(prefix="cswap-probe-") as scratch:
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "CLAUDE_"))}
+        env.update(CLAUDE_CODE_OAUTH_TOKEN=token, ANTHROPIC_LOG="debug", CLAUDE_CONFIG_DIR=scratch)
+        try:
+            done = subprocess.run(
+                [claude, "-p", "Reply with OK", "--model", "haiku", "--tools", "",
+                 "--setting-sources", "", "--strict-mcp-config"],
+                env=env, cwd=scratch, stdin=subprocess.DEVNULL, capture_output=True,
+                text=True, timeout=PROBE_TIMEOUT_S, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return UsageOutcome(None, "probe-timeout")
+        except OSError:
+            return UsageOutcome(None, "probe-no-claude")
+    fields = {
+        (window, field): float(value)
+        for window, field, value in _PROBE_HEADER_RE.findall(done.stdout + done.stderr)
+    }
+    raw: dict = {}
+    for window, key in (("5h", "five_hour"), ("7d", "seven_day")):
+        if (window, "utilization") not in fields:
+            continue
+        entry: dict = {"utilization": round(fields[(window, "utilization")] * 100, 1)}
+        if fields.get((window, "reset")):
+            entry["resets_at"] = datetime.fromtimestamp(
+                fields[(window, "reset")], tz=timezone.utc
+            ).isoformat(timespec="seconds")
+        raw[key] = entry
+    if raw:
+        return UsageOutcome(build_usage_result(raw))
+    # No headers means no request was answered: a rejected token, or claude
+    # failing before it reached the API. Neither is a measurement.
+    rejected = "invalid" in done.stdout.lower()
+    return UsageOutcome(None, "probe-token-rejected" if rejected else "probe-no-headers")
 
 
 # Refresh failures that will not resolve by retrying THIS pass, so the caller
