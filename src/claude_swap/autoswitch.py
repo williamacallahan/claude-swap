@@ -665,15 +665,21 @@ def _read_failed(entry: UsageEntry | None) -> bool:
     The store keeps serving a failed row's last-good reading for up to
     ``TRUST_MAX_AGE_S``, which hides the active account spending to its limit:
     a probe that cannot answer is exactly how an exhausted active account looks.
-    The same failure bars an account as a failover target, or a fault failing
-    every read would rotate through them each tick. A usage-endpoint
-    ``http-429`` stays trusted: it throttles polling and does not move the
-    account's windows.
+    The same failure bars an account as any switch target, or the next tick
+    would leave it again. A usage-endpoint ``http-429`` stays trusted: it
+    throttles polling and does not move the account's windows. A reading newer
+    than the failed attempt (``import-usage`` keeps the failure count) is a
+    good read: a failure stamps ``lastAttemptAt`` and never ``fetchedAt``.
     """
     return (
         entry is not None
         and entry.consecutive_failures > 0
         and entry.last_error != "http-429"
+        and not (
+            entry.fetched_at is not None
+            and entry.last_attempt_at is not None
+            and entry.fetched_at >= entry.last_attempt_at
+        )
     )
 
 
@@ -1485,11 +1491,7 @@ class AutoSwitchEngine:
         # -- candidate selection ------------------------------------------
         switchable = self.switcher.switchable_account_numbers()
         candidates = [
-            num
-            for num in switchable
-            if num != current
-            and num not in quarantined
-            and not (trigger == "failover" and _read_failed(entries.get(num)))
+            num for num in switchable if num != current and num not in quarantined
         ]
         oauth_candidates = [
             n for n in candidates if self.switcher.account_kind_for(n) != "api_key"
@@ -1668,6 +1670,9 @@ class AutoSwitchEngine:
                 thresholds=thresholds,
             )
 
+        # A failed-read account still counts toward "all exhausted" but is never
+        # a target: landing on it would fail straight back over next tick.
+        ordered = [num for num in ordered if not _read_failed(entries.get(num))]
         priority_active_ready = priority_mode and current in switchable and self._priority_ready(
             usage.get(current), headroom.get(current), settings, thresholds[current]
         )

@@ -783,7 +783,41 @@ class TestIdleHold:
             trust_extended=True,
         )
         outcome = harness.tick_with_entries({"1": failed, "2": failed, "3": failed})
-        assert outcome is not TickOutcome.SWITCHED
+        assert outcome is TickOutcome.BLOCKED
+        assert harness.active_number() == 1
+        reasons = [e.reason for e in harness.events if isinstance(e, NoSwitchEvent)]
+        assert reasons[-1] == "no-qualifying-candidate"
+        # Unreadable clears on its own: keep the normal cadence.
+        assert harness.engine._blocked_wait_long is False
+
+    def test_a_proactive_switch_skips_an_account_whose_read_failed(self, harness):
+        # Landing on it would fail straight back over on the next tick.
+        now = harness.clock.now
+        outcome = harness.tick_with_entries({
+            "1": UsageEntry(last_good=_usage(95), fetched_at=now, age_s=0.0),
+            "2": UsageEntry(
+                last_good=_usage(10), fetched_at=now - 600, age_s=600.0,
+                consecutive_failures=1, last_error="probe-timeout",
+                trust_extended=True,
+            ),
+            "3": UsageEntry(last_good=_usage(50), fetched_at=now, age_s=0.0),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert harness.active_number() == 3
+
+    def test_a_reading_newer_than_the_failed_attempt_is_a_good_read(self, harness):
+        # import-usage writes a newer reading but keeps the failure count.
+        now = harness.clock.now
+        outcome = harness.tick_with_entries({
+            "1": UsageEntry(
+                last_good=_usage(33), fetched_at=now - 60, age_s=60.0,
+                last_attempt_at=now - 600, consecutive_failures=1,
+                last_error="probe-timeout", trust_extended=True,
+            ),
+            "2": UsageEntry(last_good=_usage(10), fetched_at=now, age_s=0.0),
+            "3": UsageEntry(last_good=_usage(50), fetched_at=now, age_s=0.0),
+        })
+        assert outcome is TickOutcome.NO_ACTION
         assert harness.active_number() == 1
 
     def test_a_throttled_usage_endpoint_keeps_the_active_reading(self, harness):
