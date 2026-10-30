@@ -123,6 +123,11 @@ class TestSaveSettings:
         assert raw["autoswitch"]["futureKnob"] is True
         assert raw["autoswitch"]["threshold"] == 70.0
 
+    def test_a_saved_file_ends_with_a_newline(self, tmp_path: Path):
+        # A dotfiles-tracked settings.json stays clean after a rewrite.
+        save_settings(tmp_path, AutoSwitchSettings())
+        assert settings_path(tmp_path).read_text().endswith("}\n")
+
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
     def test_file_mode_is_0600(self, tmp_path: Path):
         save_settings(tmp_path, AutoSwitchSettings())

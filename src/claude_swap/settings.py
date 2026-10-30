@@ -569,4 +569,6 @@ def atomic_write_json(path: Path, data: dict) -> None:
     if sys.platform != "win32":
         # `path.parent`, NOT the target's: see the docstring.
         os.chmod(path.parent, 0o700)
-    atomic_write_text(target, json.dumps(data, indent=2))
+    # A final newline keeps a version-controlled settings.json (a dotfiles
+    # checkout) clean after cswap rewrites it.
+    atomic_write_text(target, json.dumps(data, indent=2) + "\n")
