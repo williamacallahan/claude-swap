@@ -1732,3 +1732,43 @@ echo OK
 
         assert outcome.usage is None
         assert outcome.error == "probe-no-headers"
+
+    def test_a_limited_answer_is_read_once_not_retried_into_a_timeout(
+        self, tmp_path, monkeypatch
+    ):
+        # Without the retry cap the fake stalls past the probe deadline, the
+        # way Claude Code's backoff on a 429 outlived the 45 s probe.
+        monkeypatch.setattr(oauth, "PROBE_TIMEOUT_S", 2.0)
+        self._fake_claude(tmp_path, monkeypatch, """
+[ "$CLAUDE_CODE_MAX_RETRIES" = 0 ] || exec sleep 10
+echo "  'anthropic-ratelimit-unified-5h-utilization': '1.0'," >&2
+echo "  'anthropic-ratelimit-unified-7d-utilization': '0.36'," >&2
+echo "API Error: 429 rate_limit_error"
+exit 1
+""")
+
+        outcome = oauth.probe_usage_via_claude(self._creds())
+
+        assert outcome.error is None
+        assert outcome.usage["five_hour"]["pct"] == 100.0
+
+    def test_a_timeout_keeps_the_headers_logged_before_it(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(oauth, "PROBE_TIMEOUT_S", 1.0)
+        self._fake_claude(tmp_path, monkeypatch, """
+echo "  'anthropic-ratelimit-unified-5h-utilization': '0.97'," >&2
+exec sleep 10
+""")
+
+        outcome = oauth.probe_usage_via_claude(self._creds())
+
+        assert outcome.error is None
+        assert outcome.usage["five_hour"]["pct"] == 97.0
+
+    def test_a_timeout_with_nothing_logged_is_an_error(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(oauth, "PROBE_TIMEOUT_S", 1.0)
+        self._fake_claude(tmp_path, monkeypatch, "exec sleep 10\n")
+
+        outcome = oauth.probe_usage_via_claude(self._creds())
+
+        assert outcome.usage is None
+        assert outcome.error == "probe-timeout"

@@ -759,6 +759,11 @@ def fetch_usage(access_token: str) -> dict | None:
 # stagger on top, so a slow probe never outlives its lease and a second
 # collector never launches a duplicate. A probe normally takes 2-8 s.
 PROBE_TIMEOUT_S = 45.0
+# The probe's one API request gets no SDK retries and its own deadline inside
+# PROBE_TIMEOUT_S: a 429 or 529 answer already carries the windows, and Claude
+# Code's default retry backoff would otherwise outlive the probe and turn that
+# answer into a bare timeout.
+PROBE_REQUEST_TIMEOUT_S = 30.0
 _PROBE_HEADER_RE = re.compile(
     r"anthropic-ratelimit-unified-(5h|7d)-(utilization|reset)['\"]?\s*[:=]\s*['\"]?([0-9.]+)"
 )
@@ -772,7 +777,11 @@ def probe_usage_via_claude(credentials: str) -> UsageOutcome:
     claude = shutil.which("claude") or str(Path.home() / ".local/bin/claude")
     with tempfile.TemporaryDirectory(prefix="cswap-probe-") as scratch:
         env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "CLAUDE_"))}
-        env.update(CLAUDE_CODE_OAUTH_TOKEN=token, ANTHROPIC_LOG="debug", CLAUDE_CONFIG_DIR=scratch)
+        env.update(
+            CLAUDE_CODE_OAUTH_TOKEN=token, ANTHROPIC_LOG="debug", CLAUDE_CONFIG_DIR=scratch,
+            CLAUDE_CODE_MAX_RETRIES="0",
+            API_TIMEOUT_MS=str(int(PROBE_REQUEST_TIMEOUT_S * 1000)),
+        )
         try:
             done = subprocess.run(
                 [claude, "-p", "Reply with OK", "--model", "haiku", "--tools", "",
@@ -780,13 +789,31 @@ def probe_usage_via_claude(credentials: str) -> UsageOutcome:
                 env=env, cwd=scratch, stdin=subprocess.DEVNULL, capture_output=True,
                 text=True, timeout=PROBE_TIMEOUT_S, check=False,
             )
-        except subprocess.TimeoutExpired:
-            return UsageOutcome(None, "probe-timeout")
+        except subprocess.TimeoutExpired as timed_out:
+            # Headers logged before the kill are still a measurement. Partial
+            # output is bytes even under text=True.
+            partial = b"".join(
+                chunk for chunk in (timed_out.stdout, timed_out.stderr)
+                if isinstance(chunk, bytes)
+            ).decode(errors="replace")
+            usage = _probe_windows(partial)
+            return UsageOutcome(usage) if usage else UsageOutcome(None, "probe-timeout")
         except OSError:
             return UsageOutcome(None, "probe-no-claude")
+    usage = _probe_windows(done.stdout + done.stderr)
+    if usage:
+        return UsageOutcome(usage)
+    # No headers means no request was answered: a rejected token, or claude
+    # failing before it reached the API. Neither is a measurement.
+    rejected = "invalid" in done.stdout.lower()
+    return UsageOutcome(None, "probe-token-rejected" if rejected else "probe-no-headers")
+
+
+def _probe_windows(debug_output: str) -> dict | None:
+    """The 5h/7d windows from a probe's debug log, or None when none were logged."""
     fields = {
         (window, field): float(value)
-        for window, field, value in _PROBE_HEADER_RE.findall(done.stdout + done.stderr)
+        for window, field, value in _PROBE_HEADER_RE.findall(debug_output)
     }
     raw: dict = {}
     for window, key in (("5h", "five_hour"), ("7d", "seven_day")):
@@ -798,12 +825,7 @@ def probe_usage_via_claude(credentials: str) -> UsageOutcome:
                 fields[(window, "reset")], tz=timezone.utc
             ).isoformat(timespec="seconds")
         raw[key] = entry
-    if raw:
-        return UsageOutcome(build_usage_result(raw))
-    # No headers means no request was answered: a rejected token, or claude
-    # failing before it reached the API. Neither is a measurement.
-    rejected = "invalid" in done.stdout.lower()
-    return UsageOutcome(None, "probe-token-rejected" if rejected else "probe-no-headers")
+    return build_usage_result(raw) if raw else None
 
 
 # Refresh failures that will not resolve by retrying THIS pass, so the caller

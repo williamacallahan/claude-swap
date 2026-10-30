@@ -753,6 +753,54 @@ class TestIdleHold:
         assert harness.engine._unhealthy_ticks == 0
         assert harness.active_number() == 1
 
+    def test_one_failed_active_read_fails_over_despite_a_trusted_reading(
+        self, harness
+    ):
+        # The store still trusts the active's 33% after a probe timeout; the
+        # account in use may have spent to its limit since, so the first
+        # failed read hands over instead of waiting out unhealthy ticks.
+        now = harness.clock.now
+        outcome = harness.tick_with_entries({
+            "1": UsageEntry(
+                last_good=_usage(33), fetched_at=now - 600, age_s=600.0,
+                consecutive_failures=1, last_error="probe-timeout",
+                trust_extended=True,
+            ),
+            "2": UsageEntry(last_good=_usage(10), fetched_at=now, age_s=0.0),
+            "3": UsageEntry(last_good=_usage(50), fetched_at=now, age_s=0.0),
+        })
+        assert outcome is TickOutcome.SWITCHED
+        switch = next(e for e in harness.events if isinstance(e, SwitchEvent))
+        assert switch.trigger == "failover"
+        assert harness.active_number() == 2
+
+    def test_failover_never_targets_an_account_whose_read_failed(self, harness):
+        # A fault failing every probe must not rotate through the accounts.
+        now = harness.clock.now
+        failed = UsageEntry(
+            last_good=_usage(10), fetched_at=now - 600, age_s=600.0,
+            consecutive_failures=1, last_error="probe-no-claude",
+            trust_extended=True,
+        )
+        outcome = harness.tick_with_entries({"1": failed, "2": failed, "3": failed})
+        assert outcome is not TickOutcome.SWITCHED
+        assert harness.active_number() == 1
+
+    def test_a_throttled_usage_endpoint_keeps_the_active_reading(self, harness):
+        # http-429 throttles polling, not the account: its reading still holds.
+        now = harness.clock.now
+        outcome = harness.tick_with_entries({
+            "1": UsageEntry(
+                last_good=_usage(33), fetched_at=now - 600, age_s=600.0,
+                consecutive_failures=1, last_error="http-429",
+                trust_extended=True,
+            ),
+            "2": UsageEntry(last_good=_usage(10), fetched_at=now, age_s=0.0),
+            "3": UsageEntry(last_good=_usage(50), fetched_at=now, age_s=0.0),
+        })
+        assert outcome is TickOutcome.NO_ACTION
+        assert harness.active_number() == 1
+
     def test_plain_fetch_failure_still_counts_unhealthy(self, harness):
         # A None (network failure / dead creds) is NOT the idle sentinel:
         # unhealthy counting and the hold clock reset both apply.

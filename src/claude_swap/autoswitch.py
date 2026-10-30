@@ -62,7 +62,7 @@ from claude_swap.poll_policy import (
 )
 from claude_swap.settings import AutoSwitchSettings, atomic_write_json, parse_model_names
 from claude_swap.switcher import ClaudeAccountSwitcher
-from claude_swap.usage_store import due_candidate, plan_oversleeps_interval
+from claude_swap.usage_store import UsageEntry, due_candidate, plan_oversleeps_interval
 
 STATE_FILENAME = "autoswitch_state.json"
 STATE_SCHEMA_VERSION = 1
@@ -657,6 +657,36 @@ def _every_account_above_threshold(
 
 def _ref(number: str, email: str) -> dict:
     return {"number": int(number), "email": email}
+
+
+def _read_failed(entry: UsageEntry | None) -> bool:
+    """Whether an account's latest usage read failed.
+
+    The store keeps serving a failed row's last-good reading for up to
+    ``TRUST_MAX_AGE_S``, which hides the active account spending to its limit:
+    a probe that cannot answer is exactly how an exhausted active account looks.
+    The same failure bars an account as a failover target, or a fault failing
+    every read would rotate through them each tick. A usage-endpoint
+    ``http-429`` stays trusted: it throttles polling and does not move the
+    account's windows.
+    """
+    return (
+        entry is not None
+        and entry.consecutive_failures > 0
+        and entry.last_error != "http-429"
+    )
+
+
+def _decision_usage(
+    entries: dict[str, UsageEntry], current: str
+) -> dict[str, dict | str | None]:
+    """Per-account decision values, with a failed active read as unknown."""
+    usage = {num: entry.decision_value() for num, entry in entries.items()}
+    if _read_failed(entries.get(current)) and isinstance(
+        usage.get(current), dict
+    ):
+        usage[current] = None
+    return usage
 
 
 def _headroom_by_account(
@@ -1430,7 +1460,12 @@ class AutoSwitchEngine:
             else:
                 self._idle_hold_since = None
             self._unhealthy_ticks += 1
-            if self._unhealthy_ticks < settings.unhealthy_ticks:
+            # A failed read is evidence; only an unread account (no attempt yet,
+            # a claim in flight) waits out the unhealthy ticks.
+            if (
+                not _read_failed(entries.get(current))
+                and self._unhealthy_ticks < settings.unhealthy_ticks
+            ):
                 self._emit(
                     NoSwitchEvent(
                         reason="active-usage-unknown",
@@ -1452,7 +1487,9 @@ class AutoSwitchEngine:
         candidates = [
             num
             for num in switchable
-            if num != current and num not in quarantined
+            if num != current
+            and num not in quarantined
+            and not (trigger == "failover" and _read_failed(entries.get(num)))
         ]
         oauth_candidates = [
             n for n in candidates if self.switcher.account_kind_for(n) != "api_key"
@@ -1614,7 +1651,7 @@ class AutoSwitchEngine:
             entries = self.switcher.usage_entries_by_account(
                 fetch={current, *candidates}
             )
-            usage = {num: entry.decision_value() for num, entry in entries.items()}
+            usage = _decision_usage(entries, current)
             headroom = _headroom_by_account(usage, self._models)
             active_headroom = headroom.get(current)
             decided_now = self.clock()
@@ -2573,7 +2610,7 @@ class AutoSwitchEngine:
             # nomination preserves a valid future plan under the store lock.
             scheduled=not stale_candidate_plan,
         )
-        usage = {num: entry.decision_value() for num, entry in entries.items()}
+        usage = _decision_usage(entries, current)
 
         active_value = usage.get(current)
         active_headroom = oauth.account_headroom(
@@ -2625,7 +2662,7 @@ class AutoSwitchEngine:
             entries = self.switcher.usage_entries_by_account(
                 fetch=escalation_fetch
             )
-            usage = {num: entry.decision_value() for num, entry in entries.items()}
+            usage = _decision_usage(entries, current)
 
         headroom = _headroom_by_account(usage, self._models)
         return entries, usage, headroom
