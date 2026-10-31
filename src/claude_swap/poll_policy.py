@@ -100,9 +100,12 @@ CANDIDATE_MAX_INTERVAL_S = 600.0
 # A setup-token's reading is one real `claude -p` (a process spawn and ~3k
 # mostly cached tokens of the account's own quota), so it never polls faster
 # than these, whatever the plan above asks: the active account fast enough to
-# switch before its limit, an idle one rarely, since only use moves it.
+# switch before its limit, an idle one rarely, since only use moves it. Every
+# fleet host probes the same accounts on its own clock, so the idle floor is
+# half of TRUST_MAX_AGE_S: a reading stays decision-trusted across one missed
+# probe, and the active account's floor still catches a stale switch target.
 PROBE_ACTIVE_INTERVAL_S = 120.0
-PROBE_IDLE_INTERVAL_S = 900.0
+PROBE_IDLE_INTERVAL_S = 1800.0
 
 
 def probe_floor_s(is_active: bool) -> float:
