@@ -112,6 +112,18 @@ def probe_floor_s(is_active: bool) -> float:
     """The shortest gap between two probe reads of one setup-token slot."""
     return PROBE_ACTIVE_INTERVAL_S if is_active else PROBE_IDLE_INTERVAL_S
 
+
+def probe_due_at(
+    fetched_at: float, usage: dict | None, is_active: bool, models: tuple[str, ...] = ()
+) -> float:
+    """Earliest time a setup-token slot read at ``fetched_at`` may be probed
+    again. A relevant window that resets inside the floor ends it (+ slack):
+    the reading is obsolete then, and an exhausted candidate whose window just
+    reset must not stay unusable for the rest of the floor."""
+    due = fetched_at + probe_floor_s(is_active)
+    reset_ts = earliest_future_reset_ts(usage, fetched_at, models)
+    return due if reset_ts is None else min(due, reset_ts + RESET_SLACK_S)
+
 # Exhaustion is stable enough to poll slowly, but not to stop polling until a
 # reported reset. Quota grants and provider-side corrections can make an
 # account usable before that timestamp, and decision-grade status must not age

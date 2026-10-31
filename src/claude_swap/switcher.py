@@ -5590,7 +5590,10 @@ class ClaudeAccountSwitcher:
             return (
                 oauth.reads_usage_by_probe(info[5])
                 and fetched_at is not None
-                and floor_now - fetched_at < poll_policy.probe_floor_s(bool(info[4]))
+                and floor_now
+                < poll_policy.probe_due_at(
+                    fetched_at, entries[num].last_good, bool(info[4]), models
+                )
             )
 
         requested = [
@@ -5830,8 +5833,9 @@ class ClaudeAccountSwitcher:
             if oauth.reads_usage_by_probe(info_by_num[num][5]):
                 # A setup-token's reading is a real Claude Code request, not a
                 # free endpoint call, so it keeps its own slower cadence.
-                floor = poll_policy.probe_floor_s(is_active)
-                next_at, interval = max(next_at, now + floor), max(interval, floor)
+                due = poll_policy.probe_due_at(now, rec.usage, is_active, models)
+                next_at = max(next_at, due)
+                interval = max(interval, poll_policy.probe_floor_s(is_active))
             plans[num] = (next_at, interval)
         return plans
 

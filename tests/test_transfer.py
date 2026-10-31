@@ -2312,6 +2312,36 @@ class TestSetupTokensReadFleetUsage:
 
         assert probe.call_count == 1
 
+    def test_a_window_reset_ends_the_idle_probe_floor(self, temp_home: Path):
+        from datetime import datetime, timezone
+
+        from claude_swap import oauth, poll_policy
+
+        s = self._token_switcher(temp_home)
+        resets_at = time.time() + 60
+        exhausted = {
+            "five_hour": {
+                "pct": 100.0,
+                "resets_at": datetime.fromtimestamp(resets_at, timezone.utc).isoformat(),
+            }
+        }
+        with patch(
+            "claude_swap.oauth.try_fetch_usage_for_account",
+            return_value=oauth.UsageOutcome({"five_hour": {"pct": 1.0}}),
+        ), patch(
+            "claude_swap.oauth.probe_usage_via_claude",
+            return_value=oauth.UsageOutcome(exhausted),
+        ) as probe:
+            s.usage_entries_by_account(fetch={"2"})
+            entry = s._usage_store.entries({"2": ("bob@example.com", self.ORG)})["2"]
+            assert entry.next_poll_at <= resets_at + poll_policy.RESET_SLACK_S
+            # Past the reset, the exhausted reading is obsolete: the floor
+            # yields instead of holding the candidate unusable for 30 minutes.
+            s._usage_store.clock = lambda: resets_at + poll_policy.RESET_SLACK_S + 1
+            s.usage_entries_by_account(fetch={"2"})
+
+        assert probe.call_count == 2
+
     def test_a_rejected_token_reads_relogin_needed(self, temp_home: Path):
         from claude_swap import oauth
         from claude_swap.json_output import USAGE_RELOGIN_REQUIRED
