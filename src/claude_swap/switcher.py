@@ -7596,21 +7596,26 @@ class ClaudeAccountSwitcher:
                     existing_config = (
                         self._read_json(config_path) if config_path.exists() else None
                     )
+                    from claude_swap.session import install_identity
+
                     if existing_config is not None:
                         # `is not None`, not truthiness. A VALID but empty `{}`
                         # is readable and loses nothing by being spliced; the
                         # falsy form sent it down the salvage branch and told
                         # the user it "could not be parsed", which is the same
                         # ""-vs-None conflation this branch exists to separate.
-                        existing_config["oauthAccount"] = target_oauth
-                        self._write_json(config_path, existing_config)
+                        self._write_json(
+                            config_path, install_identity(existing_config, target_oauth)
+                        )
                     else:
                         if config_path.exists():
                             salvage = self._salvage_unreadable(
                                 config_path, emit_output, warnings_out
                             )
                             del salvage
-                        self._write_json(config_path, target_config_data)
+                        self._write_json(
+                            config_path, install_identity(target_config_data, target_oauth)
+                        )
                     config_written = True
 
                     data["activeAccountNumber"] = int(target_account)
@@ -7865,15 +7870,20 @@ class ClaudeAccountSwitcher:
                 # config for good. Absent/unreadable both fall to the same
                 # salvage-then-replace the direct-activation branch uses.
                 current_config_data = self._read_json(config_path)
+                from claude_swap.session import install_identity
+
                 if current_config_data is not None:
-                    current_config_data["oauthAccount"] = oauth_section
-                    self._write_json(config_path, current_config_data)
+                    self._write_json(
+                        config_path, install_identity(current_config_data, oauth_section)
+                    )
                 else:
                     if config_path.exists():
                         self._salvage_unreadable(
                             config_path, emit_output, warnings_out
                         )
-                    self._write_json(config_path, target_config_data)
+                    self._write_json(
+                        config_path, install_identity(target_config_data, oauth_section)
+                    )
                 transaction.record_step("config_written")
                 self._logger.info("Updated config file")
 

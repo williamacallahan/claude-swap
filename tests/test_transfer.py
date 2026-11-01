@@ -1075,6 +1075,9 @@ class TestCleanHomeActivation:
                 assert merged["numStartups"] == 42
                 # oauthAccount overlaid from imported config
                 assert merged["oauthAccount"]["emailAddress"] == "alice@example.com"
+                # A token-only host opens Claude past its first-run theme picker
+                assert merged["hasCompletedOnboarding"] is True
+                assert merged["theme"] == "dark"
 
     def test_clean_switch_fallback_when_local_config_malformed(self, temp_home: Path):
         """If ~/.claude.json exists but is malformed/empty, fall back to the

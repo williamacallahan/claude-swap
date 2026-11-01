@@ -481,6 +481,20 @@ def read_profile_config(session_dir: Path) -> dict | None:
     return config if isinstance(config, dict) else None
 
 
+def install_identity(config: dict, oauth_account: dict, theme: str = "dark") -> dict:
+    """Make ``config`` log Claude in as ``oauth_account`` without onboarding.
+
+    Claude shows its first-run theme picker when
+    ``!config.theme || !config.hasCompletedOnboarding``, so an identity
+    installed from tokens alone opens a new session on that picker. An
+    existing theme stays.
+    """
+    config["oauthAccount"] = oauth_account
+    config["hasCompletedOnboarding"] = True
+    config.setdefault("theme", theme)
+    return config
+
+
 def read_session_identity(session_dir: Path) -> tuple[str, str] | None:
     """Best-effort read of the account identity a session profile is logged in as.
 
@@ -1062,9 +1076,7 @@ class SessionManager:
         Claude reads the keychain before the plaintext file, so a hashed
         entry from an earlier credential at this path would shadow the seed.
         The identity is merged into any existing .claude.json, so the
-        profile's own projects/history survive. The ``theme`` key is
-        load-bearing: claude shows onboarding when
-        ``!config.theme || !config.hasCompletedOnboarding``.
+        profile's own projects/history survive.
         """
         delete_macos_keychain_entry(session_dir, strict=strict_keychain)
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -1073,10 +1085,9 @@ class SessionManager:
 
         atomic_write_text(session_dir / ".credentials.json", creds)
 
-        existing = read_profile_config(session_dir) or {}
-        existing["oauthAccount"] = oauth_account
-        existing["hasCompletedOnboarding"] = True
-        existing.setdefault("theme", theme)
+        existing = install_identity(
+            read_profile_config(session_dir) or {}, oauth_account, theme
+        )
         atomic_write_text(session_dir / ".claude.json", json.dumps(existing, indent=2))
 
     def _bootstrap(
