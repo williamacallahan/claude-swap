@@ -2821,6 +2821,36 @@ class TestActiveAccountRefresh:
         write_backup.assert_not_called()
         read_live.assert_not_called()   # early fingerprint check short-circuits
 
+    def test_fresh_fetch_never_resyncs_a_browser_login_over_a_setup_token(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
+    ):
+        """A setup-token slot holds setup-tokens only. A same-identity browser
+        login in the live store (the host's own /login) passes every resync
+        check, oracle included, yet must never replace the slot's token."""
+        switcher = self._switcher(sample_sequence_data)
+        setup_token = json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "sk-ant-oat01-setup",
+                "scopes": ["user:inference"],
+            }
+        })
+        switcher._write_account_credentials("1", "test@example.com", setup_token)
+
+        with patch.object(
+                 switcher, "_read_credentials", return_value=self._REFRESHED
+             ), \
+             patch("claude_swap.oauth.fetch_oauth_profile",
+                   return_value=self._PROFILE_SELF), \
+             patch("claude_swap.oauth.try_fetch_usage_for_account",
+                   return_value=oauth.UsageOutcome({"five_hour": {"pct": 3}})):
+            switcher._fetch_active_usage(
+                "1", "test@example.com", self._REFRESHED
+            )
+
+        assert switcher._read_account_credentials(
+            "1", "test@example.com"
+        ) == setup_token
+
     def _fresh_drift_pass(self, switcher, probe):
         """Drive the fresh fast path with a backup-lineage mismatch, with the
         oracle answering ``probe`` (a return_value or side_effect list)."""

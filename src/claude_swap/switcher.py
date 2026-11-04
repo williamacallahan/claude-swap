@@ -5277,9 +5277,23 @@ class ClaudeAccountSwitcher:
                 # whose live write failed), and the live bytes are the spent
                 # predecessor. Writing them back would destroy the only copy
                 # of the successor's refresh token.
-                backup_now = oauth.extract_oauth_data(
-                    self._read_account_credentials(account_num, email)
+                backup_creds = self._read_account_credentials(
+                    account_num, email
                 )
+                # A setup-token slot never takes a browser login, even of the
+                # same identity: the live login is the host's own /login, and
+                # writing it would replace the slot's setup-token.
+                if oauth.is_setup_token(backup_creds):
+                    key = (account_num, email, "setup-token")
+                    if key not in self._provenance_warned:
+                        self._provenance_warned.add(key)
+                        self._logger.warning(
+                            "Account %s holds a setup-token; the live browser "
+                            "login was not written into its backup.",
+                            account_num,
+                        )
+                    return
+                backup_now = oauth.extract_oauth_data(backup_creds)
                 if (
                     backup_now
                     and backup_now.get("refreshToken")
@@ -7143,6 +7157,12 @@ class ClaudeAccountSwitcher:
             # failed), so they are a spent predecessor. Capture nothing, as
             # for unchanged bytes; backing them up would destroy the backup's
             # only refresh token.
+            return ("own-bytes", None)
+        if live_oauth and live_oauth.get("refreshToken") and oauth.is_setup_token(
+            backup
+        ):
+            # A setup-token slot never takes a browser login, even of the same
+            # identity: capture nothing, as for unchanged bytes.
             return ("own-bytes", None)
         if live_oauth is not None and not (
             live_oauth.get("accessToken") or live_oauth.get("refreshToken")

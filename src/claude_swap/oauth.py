@@ -135,6 +135,17 @@ def reads_usage_by_probe(credentials: str) -> bool:
     return not can_read_usage(credentials) and not data.get("refreshToken")
 
 
+def is_setup_token(credentials: str) -> bool:
+    """Whether a stored OAuth credential is a setup-token: an access token
+    with no refresh token.
+
+    A slot holding one holds setup-tokens only, so a browser login of the
+    same identity (which carries a refresh token) is never captured into it.
+    """
+    data = extract_oauth_data(credentials) or {}
+    return bool(data.get("accessToken")) and not data.get("refreshToken")
+
+
 def is_newer_generation(candidate: dict, reference: dict) -> bool:
     """Whether ``candidate`` was issued after ``reference`` in one lineage.
 
