@@ -1317,6 +1317,22 @@ class TestAdoptSessionCredential:
 
         assert switcher._adopt_session_credential("2", self.EMAIL, "org-uuid") is False
 
+    def test_browser_login_is_never_adopted_over_a_setup_token(
+        self, temp_home: Path
+    ):
+        """An add-token slot records no expiresAt, so a same-account /login
+        inside `cswap run` always looks newer; a setup-token slot still never
+        takes it."""
+        setup_token = json.dumps({"claudeAiOauth": {
+            "accessToken": "sk-ant-oat01-setup", "scopes": ["user:inference"],
+        }})
+        switcher = self._switcher(setup_token)
+        self._seed_profile(switcher, _oauth_creds("sk-login", 7200))
+
+        assert switcher._session_profile_ahead("2", self.EMAIL, "org-uuid") is None
+        assert switcher._adopt_session_credential("2", self.EMAIL, "org-uuid") is False
+        assert switcher.read_account_credentials("2", self.EMAIL) == setup_token
+
     def test_profile_logged_in_as_another_account_is_not_adopted(
         self, temp_home: Path
     ):
@@ -7407,6 +7423,92 @@ class TestProvenanceGuard:
         assert any(
             "does not match a managed account" in w for w in op["warnings"]
         )
+
+    _A1_SETUP_TOKEN = json.dumps({"claudeAiOauth": {
+        "accessToken": "sk-ant-oat01-renewed", "scopes": ["user:inference"],
+    }})
+
+    @pytest.mark.parametrize("resolver, warned", [
+        ({"uuid": "uuid-2", "email": "account2@example.com",
+          "organizationUuid": ""}, "Account-2"),
+        ({"uuid": "uuid-unmanaged", "email": "elsewhere@example.com",
+          "organizationUuid": ""}, "does not match a managed account"),
+    ])
+    def test_foreign_login_under_a_setup_token_slot_is_preserved(
+        self, temp_home, mock_claude_config, sample_sequence_data,
+        resolver, warned,
+    ):
+        """The config still names setup-token slot 1, but the live store holds
+        another slot's or an unmanaged browser login: it is preserved, never
+        written into slot 1, and never lost to the target's activation."""
+        switcher, creds_store, configs_store = self._setup_two_accounts(
+            temp_home, sample_sequence_data,
+        )
+        creds_store[("1", "test@example.com")] = self._A1_SETUP_TOKEN
+        login = json.dumps({"claudeAiOauth": {
+            "accessToken": "sk-login", "refreshToken": "rt-login",
+        }})
+        live_state = {"creds": login}
+        patches = self._install_store_patches(
+            switcher, creds_store, configs_store, live_state,
+        )
+        try:
+            op = self._run_switch(switcher, resolver=resolver)
+        finally:
+            for p in patches:
+                p.stop()
+        assert creds_store[("1", "test@example.com")] == self._A1_SETUP_TOKEN
+        (entry_id,) = switcher.list_unclaimed_credentials()
+        assert _read_safety_copy(switcher, entry_id) == login
+        assert any(warned in w for w in op["warnings"])
+
+    @pytest.mark.parametrize("live_oauth, resolver, outcome", [
+        # Old setup-token still live after `cswap add-token` renewed slot 1.
+        ({"accessToken": "sk-ant-oat01-old"},
+         {"uuid": "uuid-1", "email": "test@example.com",
+          "organizationUuid": ""}, "warned"),
+        ({"accessToken": "sk-ant-oat01-old"}, None, "stashed"),
+        # Same-account browser login.
+        ({"accessToken": "sk-login-1", "refreshToken": "rt-login-1"},
+         {"uuid": "uuid-1", "email": "test@example.com",
+          "organizationUuid": ""}, "warned"),
+        # The slot's own token, shared MCP state composed in at activation.
+        ({"accessToken": "sk-ant-oat01-renewed",
+          "scopes": ["user:inference"]},
+         {"uuid": "uuid-1", "email": "test@example.com",
+          "organizationUuid": ""}, "silent"),
+    ])
+    def test_switch_never_writes_live_bytes_over_a_setup_token_slot(
+        self, temp_home, mock_claude_config, sample_sequence_data,
+        live_oauth, resolver, outcome,
+    ):
+        """A setup-token slot keeps the token `cswap add-token` stored: the
+        outgoing backup never copies a different live token into it, and a
+        different token is either named in a warning or preserved."""
+        switcher, creds_store, configs_store = self._setup_two_accounts(
+            temp_home, sample_sequence_data,
+        )
+        creds_store[("1", "test@example.com")] = self._A1_SETUP_TOKEN
+        live_state = {"creds": json.dumps({
+            "claudeAiOauth": live_oauth, "mcpOAuth": {"server": "state"},
+        })}
+        patches = self._install_store_patches(
+            switcher, creds_store, configs_store, live_state,
+        )
+        try:
+            op = self._run_switch(switcher, resolver=resolver)
+        finally:
+            for p in patches:
+                p.stop()
+        assert creds_store[("1", "test@example.com")] == self._A1_SETUP_TOKEN
+        stashed = switcher.list_unclaimed_credentials()
+        assert len(stashed) == (1 if outcome == "stashed" else 0)
+        if outcome != "stashed":
+            assert configs_store.get(("1", "test@example.com"))
+        if outcome == "silent":
+            assert op["warnings"] == []
+        else:
+            assert any("cswap add-token --slot 1" in w for w in op["warnings"])
 
     def test_blank_stored_uuid_email_match_is_alien_not_foreign(
         self, temp_home, mock_claude_config, sample_sequence_data,

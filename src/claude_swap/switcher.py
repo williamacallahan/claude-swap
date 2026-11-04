@@ -3212,6 +3212,11 @@ class ClaudeAccountSwitcher:
         ):
             return None
         issued = oauth.extract_oauth_data(profile) or {}
+        if issued.get("refreshToken") and oauth.is_setup_token(backup):
+            # A setup-token slot never takes a browser login. Its backup
+            # records no expiresAt, so a same-account /login inside the
+            # session would otherwise always read as the newer generation.
+            return None
         stored = oauth.extract_oauth_data(backup) or {}
         try:
             newer = float(issued.get("expiresAt") or 0) > float(
@@ -7125,6 +7130,15 @@ class ClaudeAccountSwitcher:
           fail-open backup poison the slot with bytes we have already
           proven foreign (this switch may BE the repair that verdict
           triggered).
+        - ``"setup-token-kept"`` — resolved to this slot, but the slot holds
+          a setup-token and the live bytes carry a different token (a
+          same-account browser login, or the old token still live after
+          ``cswap add-token`` renewed the slot). Never written into the slot:
+          the config is refreshed and the user is warned.
+        - ``"setup-token-unresolved"`` — the ``"unresolved"`` case over a
+          setup-token slot. Preserved in a safety copy like ``"alien"``,
+          never written: the slot's token is known-good, and the live bytes
+          may be another account's login under a stale config.
         - ``"unresolved"``     — mismatch and identity could not be
           established (offline, endpoint failure, malformed response, no
           access token in the blob, bytes moved since the pre-lock read) —
@@ -7158,12 +7172,41 @@ class ClaudeAccountSwitcher:
             # for unchanged bytes; backing them up would destroy the backup's
             # only refresh token.
             return ("own-bytes", None)
-        if live_oauth and live_oauth.get("refreshToken") and oauth.is_setup_token(
-            backup
+        kind, foreign_slot = self._resolve_outgoing_owner(
+            current_account, current_email, original_creds, provenance, data,
+            live_oauth,
+        )
+        if (
+            kind in ("own-rotated", "unresolved")
+            and backup
+            and oauth.is_setup_token(backup)
         ):
-            # A setup-token slot never takes a browser login, even of the same
-            # identity: capture nothing, as for unchanged bytes.
-            return ("own-bytes", None)
+            # A setup-token slot holds the token `cswap add-token` stored and
+            # nothing else: never a browser login, never an older token still
+            # live after a renewal. Only after identity is resolved, so a
+            # foreign login under a stale config is still preserved.
+            if oauth.access_token_fingerprint(
+                original_creds
+            ) == oauth.access_token_fingerprint(backup):
+                # The slot's own token with shared fields composed in.
+                return ("own-bytes", None)
+            if kind == "own-rotated":
+                return ("setup-token-kept", None)
+            return ("setup-token-unresolved", None)
+        return (kind, foreign_slot)
+
+    def _resolve_outgoing_owner(
+        self,
+        current_account: str,
+        current_email: str,
+        original_creds: str,
+        provenance: dict,
+        data: dict,
+        live_oauth: dict | None,
+    ) -> tuple[str, str | None]:
+        """The identity half of ``_classify_outgoing_credential``: who owns
+        live bytes that neither match the slot's backup nor share its
+        lineage."""
         if live_oauth is not None and not (
             live_oauth.get("accessToken") or live_oauth.get("refreshToken")
         ):
@@ -7728,7 +7771,9 @@ class ClaudeAccountSwitcher:
                     current_account, current_email, original_creds,
                     provenance, data,
                 )
-                if kind in ("foreign", "alien", "known-foreign"):
+                if kind in (
+                    "foreign", "alien", "known-foreign", "setup-token-unresolved"
+                ):
                     # Positively not this slot's bytes: never into a slot;
                     # never silently destroyed. The safety copy (which raises
                     # on failure, aborting before the live store is
@@ -7745,6 +7790,17 @@ class ClaudeAccountSwitcher:
                             f"{foreign_slot} later cannot authenticate, log "
                             "in as it and run: cswap add --slot "
                             f"{foreign_slot}"
+                        )
+                    elif kind == "setup-token-unresolved":
+                        msg = (
+                            f"Account-{current_account} holds a setup-token, "
+                            "and the live credential carries a different "
+                            "token whose owner could not be verified. It was "
+                            "preserved and not written into Account-"
+                            f"{current_account}. If Account-{current_account} "
+                            "later cannot authenticate, mint a token with "
+                            "`claude setup-token` and run: cswap add-token "
+                            f"--slot {current_account}"
                         )
                     elif kind == "known-foreign":
                         msg = (
@@ -7775,6 +7831,28 @@ class ClaudeAccountSwitcher:
                         "stored backup, so nothing was written into "
                         f"Account-{current_account}."
                     )
+                    if emit_output:
+                        warning(msg)
+                    else:
+                        warnings_out.append(msg)
+                elif kind == "setup-token-kept":
+                    # The live token is this account's but not the slot's
+                    # setup-token: a browser /login, or the old token still
+                    # live after `cswap add-token` renewed the slot. The slot
+                    # keeps its token; refresh only the config backup.
+                    self._write_account_config(
+                        current_account, current_email, original_config
+                    )
+                    msg = (
+                        f"Account-{current_account} holds a setup-token, so "
+                        "the live credential (a different token for the same "
+                        "account) was not written into it. If Account-"
+                        f"{current_account} cannot authenticate after "
+                        "switching back, mint a token with `claude "
+                        "setup-token` and run: cswap add-token --slot "
+                        f"{current_account}"
+                    )
+                    self._logger.warning(msg)
                     if emit_output:
                         warning(msg)
                     else:
