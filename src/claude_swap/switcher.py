@@ -5377,10 +5377,10 @@ class ClaudeAccountSwitcher:
         # "re-login needed" and fails over until a new token replaces it.
         if oauth.reads_usage_by_probe(creds):
             # Only a model's own request reports its weekly window, so the
-            # probe asks the first model autoswitch gates on. "all" names no
-            # model to ask.
+            # probe asks each model switching gates on. "all" names no model
+            # to ask.
             models = [m for m in self._poll_policy_inputs()[2] if m.lower() != "all"]
-            outcome = oauth.probe_usage_via_claude(creds, models[0] if models else None)
+            outcome = oauth.probe_usage_for_models(creds, models)
             return FetchRecord(
                 usage=outcome.usage,
                 error=outcome.error,
@@ -6492,6 +6492,11 @@ class ClaudeAccountSwitcher:
         warnings: list[str] = []
         if strategy_label == "rotation":
             models = ()  # model limits only steer the usage-aware strategies
+        if models:
+            # A `--model` given here must reach the usage read: a setup-token
+            # reports a model's weekly window only when the probe asks it.
+            threshold, weekly_threshold, _ = self._poll_policy_inputs()
+            self.set_poll_policy_inputs(threshold, weekly_threshold, tuple(models))
         if models and not json_output:
             source = "--model" if model_source == "cli" else model_source
             print(dimmed(

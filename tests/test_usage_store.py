@@ -47,6 +47,45 @@ def store(tmp_path, clock):
     return UsageStore(tmp_path / "cache", clock=clock)
 
 
+class TestUnreportedModelWindows:
+    """A setup-token read that asked no model says nothing about a model's week."""
+
+    @staticmethod
+    def _fable(clock, pct: float, resets_in_s: float) -> dict:
+        from datetime import datetime, timezone
+
+        resets_at = datetime.fromtimestamp(clock() + resets_in_s, timezone.utc).isoformat()
+        return {"name": "Fable", "pct": pct, "resets_at": resets_at}
+
+    def test_a_read_without_model_windows_keeps_the_unreset_ones(self, store, clock):
+        spent = self._fable(clock, 100.0, 3600)
+        store.record({"1": FetchRecord(usage={"seven_day": {"pct": 55.0}, "scoped": [spent]})}, IDENT)
+        clock.advance(60)
+        store.record({"1": FetchRecord(usage={"seven_day": {"pct": 56.0}})}, IDENT)
+
+        last_good = store.entries(IDENT)["1"].last_good
+        assert last_good["seven_day"]["pct"] == 56.0
+        assert last_good["scoped"] == [spent]
+
+    def test_a_window_past_its_reset_is_not_kept(self, store, clock):
+        spent = self._fable(clock, 100.0, 30)
+        store.record({"1": FetchRecord(usage={"seven_day": {"pct": 55.0}, "scoped": [spent]})}, IDENT)
+        clock.advance(60)
+        store.record({"1": FetchRecord(usage={"seven_day": {"pct": 56.0}})}, IDENT)
+
+        assert "scoped" not in store.entries(IDENT)["1"].last_good
+
+    def test_a_read_that_reports_model_windows_replaces_them(self, store, clock):
+        store.record(
+            {"1": FetchRecord(usage={"seven_day": {"pct": 55.0}, "scoped": [self._fable(clock, 100.0, 3600)]})},
+            IDENT,
+        )
+        fresh = self._fable(clock, 4.0, 7200)
+        store.record({"1": FetchRecord(usage={"seven_day": {"pct": 1.0}, "scoped": [fresh]})}, IDENT)
+
+        assert store.entries(IDENT)["1"].last_good["scoped"] == [fresh]
+
+
 class TestSchema:
     def test_empty_when_missing(self, store):
         entries = store.entries(IDENT)

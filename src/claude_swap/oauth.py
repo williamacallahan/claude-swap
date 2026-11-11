@@ -831,6 +831,29 @@ def probe_usage_via_claude(credentials: str, model: str | None = None) -> UsageO
     return UsageOutcome(None, "probe-token-rejected" if rejected else "probe-no-headers")
 
 
+def probe_usage_for_models(credentials: str, models: Sequence[str]) -> UsageOutcome:
+    """One reading for a setup-token carrying every named model's weekly window.
+
+    Each model's window comes back only on its own request, so each named model
+    is asked once and their ``scoped`` entries are merged into the last answer's
+    account-wide windows. A name Claude Code refuses (a typo, a model the plan
+    lacks) is answered without headers; that model is skipped, so a bad name
+    costs its own window and never the account's 5h/7d reading."""
+    usage: dict | None = None
+    scoped: list[dict] = []
+    for model in models:
+        outcome = probe_usage_via_claude(credentials, model)
+        if outcome.error == "probe-no-headers":
+            continue
+        if outcome.usage is None:
+            return outcome
+        scoped += outcome.usage.get("scoped") or []
+        usage = outcome.usage
+    if usage is None:
+        return probe_usage_via_claude(credentials)
+    return UsageOutcome({**usage, "scoped": scoped} if scoped else usage)
+
+
 def _probe_windows(debug_output: str, model: str | None = None) -> dict | None:
     """The windows from a probe's debug log, in the usage endpoint's shape, or
     None when none were logged. A ``7d_<id>`` window is the weekly limit of

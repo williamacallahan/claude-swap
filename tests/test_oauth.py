@@ -1750,6 +1750,37 @@ echo OK
         assert outcome.usage["seven_day"]["pct"] == 29.0
         assert "scoped" not in outcome.usage
 
+    def test_each_named_model_is_asked_and_their_windows_merged(self, tmp_path, monkeypatch):
+        self._fake_claude(tmp_path, monkeypatch, """
+echo "  'anthropic-ratelimit-unified-7d-utilization': '0.29'," >&2
+case "$*" in
+  *"--model fable"*) echo "  'anthropic-ratelimit-unified-7d_oi-utilization': '0.83'," >&2 ;;
+  *"--model opus"*) echo "  'anthropic-ratelimit-unified-7d_op-utilization': '0.12'," >&2 ;;
+esac
+echo OK
+""")
+        outcome = oauth.probe_usage_for_models(self._creds(), ("Opus", "Fable"))
+
+        assert outcome.usage["seven_day"]["pct"] == 29.0
+        assert [(w["name"], w["pct"]) for w in outcome.usage["scoped"]] == [
+            ("Opus", 12.0), ("Fable", 83.0),
+        ]
+
+    def test_a_refused_model_name_costs_only_its_own_window(self, tmp_path, monkeypatch):
+        # Claude Code answers an unknown model without reaching the rate limiter.
+        self._fake_claude(tmp_path, monkeypatch, """
+case "$*" in *"--model fabel"*)
+  echo "There's an issue with the selected model (fabel)."; exit 1 ;;
+esac
+echo "  'anthropic-ratelimit-unified-7d-utilization': '0.29'," >&2
+echo OK
+""")
+        outcome = oauth.probe_usage_for_models(self._creds(), ("Fabel",))
+
+        assert outcome.error is None
+        assert outcome.usage["seven_day"]["pct"] == 29.0
+        assert "scoped" not in outcome.usage
+
     def test_a_rejected_token_is_an_error_not_a_reading(self, tmp_path, monkeypatch):
         self._fake_claude(tmp_path, monkeypatch, 'echo "Invalid API key · Please run /login"\nexit 1\n')
 

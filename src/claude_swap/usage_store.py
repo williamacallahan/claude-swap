@@ -33,6 +33,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 
 from claude_swap.locking import FileLock
@@ -518,6 +519,28 @@ def _earliest_reset(last_good: dict | None, models: tuple[str, ...] = ()) -> flo
         if (ts := parse_reset_ts(resets_at)) is not None
     ]
     return min(resets) if resets else None
+
+
+def _keeping_unreported_scoped(usage: dict | None, stored: object, now: float) -> dict | None:
+    """``usage``, plus the stored reading's per-model windows when ``usage``
+    reports none and they have not reset yet.
+
+    A setup-token reports a model's weekly window only when the read asked that
+    model, so a read that asked none (another process or machine gating on no
+    model, or a probe cut off before those headers) says nothing about it.
+    Replacing the row wholesale would erase a spent Fable week until the next
+    probe floor passes, and the engine would switch onto that account."""
+    if not isinstance(usage, dict) or "scoped" in usage or not isinstance(stored, dict):
+        return usage
+    kept = []
+    for window in stored.get("scoped") or []:
+        try:
+            reset_ts = datetime.fromisoformat(window["resets_at"]).timestamp()
+        except (KeyError, TypeError, ValueError):
+            continue
+        if reset_ts > now:
+            kept.append(window)
+    return {**usage, "scoped": kept} if kept else usage
 
 
 def _rate_limited_trust_ok(
@@ -1121,7 +1144,7 @@ class UsageStore:
                 return
             row["lastAttemptAt"] = now
             if rec.error is None:
-                row["lastGood"] = rec.usage
+                row["lastGood"] = _keeping_unreported_scoped(rec.usage, row.get("lastGood"), now)
                 row["fetchedAt"] = now
                 # Replace the old, possibly due plan in the outcome transaction
                 # so no collector can slip into a record→replan gap.
@@ -1229,7 +1252,7 @@ class UsageStore:
             fetched_at = now - max(0.0, age_s)
             stored = _num_or_none(row.get("fetchedAt"))
             if stored is None or fetched_at > stored:
-                row["lastGood"] = usage
+                row["lastGood"] = _keeping_unreported_scoped(usage, row.get("lastGood"), now)
                 row["fetchedAt"] = fetched_at
                 stored = fetched_at
                 adopted.add(num)
