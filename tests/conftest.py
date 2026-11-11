@@ -754,7 +754,7 @@ def _block_claude_usage_probe(request, monkeypatch):
 
     monkeypatch.setattr(
         "claude_swap.oauth.probe_usage_via_claude",
-        lambda credentials: oauth.UsageOutcome(None, "probe-blocked-under-pytest"),
+        lambda credentials, model=None: oauth.UsageOutcome(None, "probe-blocked-under-pytest"),
     )
 
 

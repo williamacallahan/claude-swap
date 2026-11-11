@@ -5376,7 +5376,11 @@ class ClaudeAccountSwitcher:
         # A rejected token strikes this exact credential, so the slot reads
         # "re-login needed" and fails over until a new token replaces it.
         if oauth.reads_usage_by_probe(creds):
-            outcome = oauth.probe_usage_via_claude(creds)
+            # Only a model's own request reports its weekly window, so the
+            # probe asks the first model autoswitch gates on. "all" names no
+            # model to ask.
+            models = [m for m in self._poll_policy_inputs()[2] if m.lower() != "all"]
+            outcome = oauth.probe_usage_via_claude(creds, models[0] if models else None)
             return FetchRecord(
                 usage=outcome.usage,
                 error=outcome.error,

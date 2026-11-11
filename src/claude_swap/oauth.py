@@ -775,13 +775,24 @@ PROBE_TIMEOUT_S = 45.0
 # Code's default retry backoff would otherwise outlive the probe and turn that
 # answer into a bare timeout.
 PROBE_REQUEST_TIMEOUT_S = 30.0
+# A window key is ``5h`` or ``7d`` for the account-wide windows, or ``7d_<id>``
+# for the weekly window of the model the request named (a Fable request is
+# answered with ``7d_oi``; Haiku, Sonnet, and Opus requests carry none).
 _PROBE_HEADER_RE = re.compile(
-    r"anthropic-ratelimit-unified-(5h|7d)-(utilization|reset)['\"]?\s*[:=]\s*['\"]?([0-9.]+)"
+    r"anthropic-ratelimit-unified-(5h|7d(?:_[a-z0-9]+)?)-(utilization|reset)"
+    r"['\"]?\s*[:=]\s*['\"]?([0-9.]+)"
 )
+# The cheapest model: used when no per-model window is asked for.
+PROBE_DEFAULT_MODEL = "haiku"
 
 
-def probe_usage_via_claude(credentials: str) -> UsageOutcome:
-    """Usage for a setup-token, read from one real Claude Code request's headers."""
+def probe_usage_via_claude(credentials: str, model: str | None = None) -> UsageOutcome:
+    """Usage for a setup-token, read from one real Claude Code request's headers.
+
+    ``model`` is the display name (e.g. "Fable") whose weekly window the caller
+    gates on: the request is sent to that model, because only its own requests
+    are answered with its window, which is reported as a ``scoped`` entry under
+    that name. None reads the account-wide windows with the cheapest model."""
     token = extract_access_token(credentials)
     if not token:
         return UsageOutcome(None, "no-access-token")
@@ -795,7 +806,7 @@ def probe_usage_via_claude(credentials: str) -> UsageOutcome:
         )
         try:
             done = subprocess.run(
-                [claude, "-p", "Reply with OK", "--model", "haiku", "--tools", "",
+                [claude, "-p", "Reply with OK", "--model", (model or PROBE_DEFAULT_MODEL).lower(), "--tools", "",
                  "--setting-sources", "", "--strict-mcp-config"],
                 env=env, cwd=scratch, stdin=subprocess.DEVNULL, capture_output=True,
                 text=True, timeout=PROBE_TIMEOUT_S, check=False,
@@ -807,11 +818,11 @@ def probe_usage_via_claude(credentials: str) -> UsageOutcome:
                 chunk for chunk in (timed_out.stdout, timed_out.stderr)
                 if isinstance(chunk, bytes)
             ).decode(errors="replace")
-            usage = _probe_windows(partial)
+            usage = _probe_windows(partial, model)
             return UsageOutcome(usage) if usage else UsageOutcome(None, "probe-timeout")
         except OSError:
             return UsageOutcome(None, "probe-no-claude")
-    usage = _probe_windows(done.stdout + done.stderr)
+    usage = _probe_windows(done.stdout + done.stderr, model)
     if usage:
         return UsageOutcome(usage)
     # No headers means no request was answered: a rejected token, or claude
@@ -820,22 +831,35 @@ def probe_usage_via_claude(credentials: str) -> UsageOutcome:
     return UsageOutcome(None, "probe-token-rejected" if rejected else "probe-no-headers")
 
 
-def _probe_windows(debug_output: str) -> dict | None:
-    """The 5h/7d windows from a probe's debug log, or None when none were logged."""
+def _probe_windows(debug_output: str, model: str | None = None) -> dict | None:
+    """The windows from a probe's debug log, in the usage endpoint's shape, or
+    None when none were logged. A ``7d_<id>`` window is the weekly limit of
+    ``model``, the model the probe asked."""
     fields = {
         (window, field): float(value)
         for window, field, value in _PROBE_HEADER_RE.findall(debug_output)
     }
-    raw: dict = {}
-    for window, key in (("5h", "five_hour"), ("7d", "seven_day")):
-        if (window, "utilization") not in fields:
-            continue
-        entry: dict = {"utilization": round(fields[(window, "utilization")] * 100, 1)}
+
+    def window_entry(window: str, pct_key: str) -> dict:
+        entry: dict = {pct_key: round(fields[(window, "utilization")] * 100, 1)}
         if fields.get((window, "reset")):
             entry["resets_at"] = datetime.fromtimestamp(
                 fields[(window, "reset")], tz=timezone.utc
             ).isoformat(timespec="seconds")
-        raw[key] = entry
+        return entry
+
+    raw: dict = {}
+    for window, field in sorted(fields):
+        if field != "utilization":
+            continue
+        if window == "5h":
+            raw["five_hour"] = window_entry(window, "utilization")
+        elif window == "7d":
+            raw["seven_day"] = window_entry(window, "utilization")
+        elif model:
+            raw.setdefault("limits", []).append(
+                {"scope": {"model": {"display_name": model}}, **window_entry(window, "percent")}
+            )
     return build_usage_result(raw) if raw else None
 
 

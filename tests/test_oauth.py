@@ -1717,6 +1717,39 @@ echo OK
         assert outcome.usage["seven_day"]["pct"] == 29.0
         assert outcome.usage["five_hour"]["resets_at"] == "2030-01-01T00:00:00+00:00"
 
+    def test_a_named_model_is_asked_and_its_weekly_window_reported(self, tmp_path, monkeypatch):
+        # Only a Fable request is answered with the Fable weekly window.
+        self._fake_claude(tmp_path, monkeypatch, """
+case "$*" in *"--model fable"*) ;; *) echo "wrong model: $*"; exit 1 ;; esac
+echo "  'anthropic-ratelimit-unified-7d-utilization': '0.29'," >&2
+echo "  'anthropic-ratelimit-unified-7d-reset': '1893888000'," >&2
+echo "  'anthropic-ratelimit-unified-7d_oi-utilization': '0.83'," >&2
+echo "  'anthropic-ratelimit-unified-7d_oi-reset': '1893456000'," >&2
+echo OK
+""")
+        outcome = oauth.probe_usage_via_claude(self._creds(), "Fable")
+
+        assert outcome.error is None
+        assert outcome.usage["seven_day"]["pct"] == 29.0
+        (fable,) = outcome.usage["scoped"]
+        assert (fable["name"], fable["pct"]) == ("Fable", 83.0)
+        assert fable["resets_at"] == "2030-01-01T00:00:00+00:00"
+        assert oauth.account_headroom(outcome.usage, ("fable",)) == 17.0
+
+    def test_without_a_model_the_cheapest_is_asked_and_no_model_window_claimed(
+        self, tmp_path, monkeypatch
+    ):
+        self._fake_claude(tmp_path, monkeypatch, """
+case "$*" in *"--model haiku"*) ;; *) echo "wrong model: $*"; exit 1 ;; esac
+echo "  'anthropic-ratelimit-unified-7d-utilization': '0.29'," >&2
+echo "  'anthropic-ratelimit-unified-7d_oi-utilization': '0.83'," >&2
+echo OK
+""")
+        outcome = oauth.probe_usage_via_claude(self._creds())
+
+        assert outcome.usage["seven_day"]["pct"] == 29.0
+        assert "scoped" not in outcome.usage
+
     def test_a_rejected_token_is_an_error_not_a_reading(self, tmp_path, monkeypatch):
         self._fake_claude(tmp_path, monkeypatch, 'echo "Invalid API key · Please run /login"\nexit 1\n')
 

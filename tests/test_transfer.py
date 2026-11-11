@@ -2258,7 +2258,7 @@ class TestSetupTokensReadFleetUsage:
             endpoint.append(email)
             return oauth.UsageOutcome({"five_hour": {"pct": 1.0}})
 
-        def fake_probe(creds):
+        def fake_probe(creds, model=None):
             probed.append(oauth.extract_access_token(creds))
             return oauth.UsageOutcome({"five_hour": {"pct": 42.0}, "seven_day": {"pct": 7.0}})
 
