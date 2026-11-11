@@ -2321,7 +2321,7 @@ class TestSetupTokensReadFleetUsage:
         from claude_swap import oauth, poll_policy
 
         s = self._token_switcher(temp_home)
-        resets_at = time.time() + 60
+        resets_at = int(time.time()) + 60
         exhausted = {
             "five_hour": {
                 "pct": 100.0,
